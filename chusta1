@@ -1,0 +1,970 @@
+problems_category <- function(DatasetSubsystemsState, DatasetUnification, DatasetProducible, DatasetOperationalKPIs, ParamsExe){
+  
+  # Industrialized Alarms
+  StopSETbyGridAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Stop_SET_by_Grid), ",")))
+  StopCurtailmentGridAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Stop_Curtailment_Grid), ",")))
+  StopGridAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Stop_Grid), ",")))
+  ManualStopSETAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Manual_Stop_SET), ",")))
+  StopSETbyFaultAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Stop_SET_by_Fault), ",")))
+  ShutdownStopSETAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Shutdown_Stop_SET), ",")))
+  ManualStopInverterAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Manual_Stop_Inverter), ",")))
+  ShutdownInverterAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Shutdown_Inverter), ",")))
+  CurtailmentGridAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Curtailment_Grid), ",")))
+  StopCurtailmentInverterAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Stop_Curtailment_Inverter), ",")))
+  StowAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Stow), ",")))
+  PrematureStowAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Premature_Stow), ",")))
+  UnderperformanceTrackerAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Underperformance_Tracker), ",")))
+  MissalignmentAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Missalignment), ",")))
+  UnderperformanceInverterAlarms <- data.table(unlist(strsplit(as.character(ParamsExe$problems_alarms_names$value$Underperformance_Inverter), ",")))
+  
+  
+  # Parameters
+  MonthDays <- as.numeric(days_in_month(Date))
+  PPeakPlant <- as.numeric(ParamsExe$apm_plant_power$value$peakPower)
+  ContractualIrradianceThreshold <- as.numeric(ParamsExe$apm_threshold_irradiance$value$contractual$availability)
+  LegalAllowedExportedPowerLimit <- as.numeric(ParamsExe$apm_legal_allowed_exported_power_limit$value) * 1000
+  NominalEfficiencyInv <- as.numeric(ParamsExe$apm_nominal_efficiency_inv$value)
+  StringSubsystem <- as.character(ParamsExe$apm_subsystem_type$value$string)
+  StringBoxSubsystem <- as.character(ParamsExe$apm_subsystem_type$value$stringbox)
+  Granularity <- as.numeric(ParamsExe$apm_granularity$value$numeric) / 60
+  STCIrradiance <- as.numeric( ParamsExe$apm_stc_conditions$value$irradiance)
+  ComissioningDate <- as.Date(as.character(ParamsExe$apm_commissioning_date$value))
+  StowValue <- as.numeric(as.character(ParamsExe$apm_stow_value$value))
+  
+  PanelAge <- floor(as.numeric((as.Date(Date) - ComissioningDate) / 365))
+  AgeingCoefficients <- fromJSON(as.character(ParamsExe$apm_ageing_degradation$value))
+  DegradCorr <- ageing_degradation_calculation(AgeingCoefficients, PanelAge)
+  
+  SubsystemsUnderInverter <- c("Element")
+  
+  dataset_name <- if ("string" %in% names(DatasetUnification)) "string" else "stringbox"
+  
+  # Datasets
+  DataPPC <- as.data.table(DatasetUnification$ppc)
+  DataInverter <- as.data.table(DatasetUnification$inverter)
+  DataMeteo <- as.data.table(DatasetUnification$meteo)
+  DataTracker <- as.data.table(DatasetUnification$tracker) 
+  DataHierarchy <- as.data.table(DatasetUnification$hierarchy)
+  DataAlarms <- as.data.table(DatasetUnification$alarms)
+  
+  
+  # Producibles
+  ProduciblePlant <- as.data.table(DatasetProducible$DatasetProducibleTheorical$DatasetTheoreticalPlant)
+  ProducibleInverter <- as.data.table(DatasetProducible$DatasetProducibleTheorical$DatasetTheoreticalInverter)
+  
+  
+  # Operational KPIs
+  DataKPIProduction <- as.data.table(DatasetOperationalKPIs$ResultProduction$ProducedMeter)
+  DataKPIIrradiation <- as.data.table(DatasetOperationalKPIs$ResultIrradiation$IrradiationMeter)
+  DataKPIPR <- as.data.table(DatasetOperationalKPIs$ResultPR$PRMeter)
+  
+  
+  # # # Preparing DataTables # # #
+  
+  # # Operational KPIs # #
+  
+  # Selecting the columns of interest
+  DataOperationalKPIs <- list(
+    DataKPIProduction[, .(Timestamp, EnergyMeasured, ProductionTarget = Target)],
+    DataKPIIrradiation[, .(Timestamp, IrradiationTarget = Target)],
+    DataKPIPR[, .(Timestamp, IrradiationAgingCorr)]
+  )
+  
+  # Merge all data frames in the list
+  DataOperationalKPIs <- reduce(DataOperationalKPIs, auxiliary_merge)
+  
+  # Calculate Irradiation Target Adjusted
+  DataOperationalKPIs[, IrradiationTargetAdjusted := 
+                        (1 - DegradCorr) * IrradiationTarget * Granularity / STCIrradiance
+  ]
+  
+  # Calculate PR
+  DataOperationalKPIs[, c("PRAdjusted", "TargetPRAdjusted") := 
+                        EnergyMeasured / (IrradiationAgingCorr * PPeakPlant * 1000),
+                      ProductionTarget / (IrradiationTargetAdjusted * PPeakPlant * 1000)
+  ]
+  
+  # # Meteo # #
+  
+  # Unique value per Timestamp
+  DataMeteo %<>%
+    dplyr::group_by(Timestamp) %>% 
+    dplyr::summarise(Soiling = min(Soiling, na.rm = TRUE),
+                     PanelTemperature = mean(PanelTemperature, na.rm = TRUE),
+                     WindSpeed = mean(WindSpeed, na.rm = TRUE)) %>% 
+    as.data.table
+  
+  # # String # #
+  
+  if ("string" %in% names(DatasetUnification)){
+    DataString <- as.data.table(DatasetUnification$string)
+    DataString2 <- as.data.table(DatasetUnification$string)
+    # Selecting the columns of interest
+    DataStringLevel <- list(
+      DataString[, .(Timestamp, Element, DCCurrent, DCVoltage, DCPower, Inverter, PPeak)],
+      DataInverter[, .(Timestamp, Inverter = Element, Irradiance, ActivePower )]
+    )
+
+    
+    # Merge all data frames in the list
+    ClassificationString <- reduce(DataStringLevel, auxiliary_merge)
+    
+    # Add Specific Intensity column
+    DataString[, SpecificIntensity := DCCurrent / PPeak]
+    DataString2[, SpecificIntensity := DCCurrent / PPeak]
+    
+    # Prepare string conditions
+    DataString %<>% 
+      dplyr::group_by(Inverter, Timestamp) %>%
+      dplyr::mutate(ZScore = scale(DCCurrent),
+                    Outlier = ifelse(is.na(ZScore), NA_integer_, 
+                                     ifelse(abs(ZScore) > 2, 1, 0)) ) %>% 
+      dplyr::summarise(Outlier = sum(Outlier, na.rm = TRUE),
+                       DCCurrent = mean(DCCurrent, na.rm = TRUE),
+                       SpecificIntensity = median(SpecificIntensity, na.rm = TRUE),
+                       .groups = "drop") %>%
+      dplyr::rename(Element = Inverter) %>% 
+      ungroup() %>% 
+      as.data.table()
+    
+    # Tag Subsystem String
+    SubsystemsUnderInverter <- c(SubsystemsUnderInverter, "String")
+  }
+  
+  # # Stringbox # #
+  
+  if("stringbox" %in% names(DatasetUnification)){
+    DataStringbox <- as.data.table(DatasetUnification$stringbox)
+    DataStringbox2 <- as.data.table(DatasetUnification$stringbox)
+    
+    # Selecting the columns of interest
+    DataStringboxLevel <- list(
+      DataStringbox[, .(Timestamp, Element, DCCurrent, DCVoltage, DCPower, Inverter, PPeak)],
+      DataInverter[, .(Timestamp, Inverter = Element, Irradiance, ActivePower )]
+    )
+    
+    # Merge all data frames in the list
+    ClassificationStringbox <- reduce(DataStringboxLevel, auxiliary_merge)
+    
+    # Add Specific Intensity column
+    DataStringbox[, SpecificIntensity := DCCurrent / PPeak]
+    DataStringbox2[, SpecificIntensity := DCCurrent / PPeak]
+    
+    # Prepare string conditions
+    DataStringbox %<>% 
+      dplyr::group_by(Inverter, Timestamp) %>%
+      dplyr::mutate(ZScore = scale(DCCurrent),
+                    Outlier = ifelse(is.na(ZScore), NA_integer_, 
+                                     ifelse(abs(ZScore) > 2, 1, 0)) ) %>% 
+      dplyr::summarise(Outlier = sum(Outlier, na.rm = TRUE),
+                       DCCurrent = mean(DCCurrent, na.rm = TRUE),
+                       SpecificIntensity = mean(SpecificIntensity, na.rm = TRUE),
+                       .groups = "drop") %>%
+      dplyr::rename(Element = Inverter) %>% 
+      ungroup() %>% 
+      as.data.table()
+    
+    # Tag Subsystem StringBox
+    SubsystemsUnderInverter <- c(SubsystemsUnderInverter, "StringBox")
+  }
+
+  # # Tracker # #
+  
+  if ("tracker" %in% names(DatasetUnification) && any(!is.na(DatasetUnification$tracker))) {
+    # Selecting the columns of interest
+    DataTrackerLevel <- list(
+      DataTracker[, .(Timestamp, Element, CurrentPosition, SetpointPosition, SunCycle)],
+      as.data.table(DatasetSubsystemsState$tracker)
+    )
+    
+    # Merge all data frames in the list
+    ClassificationTracker <- reduce(DataTrackerLevel, auxiliary_merge)
+    
+    ClassificationTracker %<>%
+      dplyr::left_join(., DataMeteo[, .(Timestamp, WindSpeed)], by = "Timestamp")
+    
+    
+    # Nest the problems
+    ClassificationTracker %<>% 
+      dplyr::left_join(., DataHierarchy[, .(Inverter, Element = Tracker)], by = "Element") %>% 
+      nest(State) 
+    
+    # Tag Subsystem String
+    SubsystemsUnderInverter <- c(SubsystemsUnderInverter, "Tracker")
+  }
+  
+  # # PPC # #
+  
+  # Selecting the columns of interest
+  DataPPCLevel <- list(
+    DataInverter[, .(Timestamp, Element, SunCycle)], 
+    DataPPC[, .(Timestamp, ActivePower, SetpointCurtailment, AssetSetpoint)],
+    ProduciblePlant[, .(Timestamp, Producible)],
+    as.data.table(DatasetSubsystemsState$inverter)
+  )
+  
+  # Merge all data frames in the list
+  ClassificationPPC <- reduce(DataPPCLevel, auxiliary_merge)
+  
+  # Nest the problems
+  ClassificationPPC %<>% nest(State) 
+  
+  # # Inverter # #
+  
+  # Selecting the columns of interest
+  DataInverterLevel <- list(
+    DataInverter[, .(Timestamp, Element, ActivePower, DCPower, SetpointActivePower, SunCycle, Irradiance)],
+    ProducibleInverter[, .(Timestamp, Element, Producible)],
+    as.data.table(DatasetSubsystemsState$inverter),
+    add_inverter_ppeak(ParamsExe)
+  )
+  
+  
+  # Merge all data frames in the list
+  ClassificationInverter <- reduce(DataInverterLevel, auxiliary_merge)
+  
+  # Nest the problems
+  ClassificationInverter %<>% nest(State) 
+  
+  # # Under Inverter # #
+  
+  if ("string" %in% names(DatasetUnification)) {
+    DataSolarField <- DataString
+  } else if ("stringbox" %in% names(DatasetUnification)) {
+    DataSolarField <- DataStringbox
+  }
+  
+  if ("string" %in% names(DatasetUnification)) {
+    DataSolarField2 <- DataString2
+  } else if ("stringbox" %in% names(DatasetUnification)) {
+    DataSolarField2 <- DataStringbox2
+  }
+  
+  DataUnderInverterLevel <- list(
+    DataInverter[, .(Timestamp, Element, ActivePower, DCPower, Irradiance, Irradiation)],
+    DataMeteo,
+    DataSolarField,
+    ProducibleInverter[, .(Timestamp, Element, Producible, PPeak)],
+    as.data.table(DatasetSubsystemsState$inverter)
+  ) 
+  
+  # Merge all data frames in the list
+  ClassificationUnderInverter <- reduce(DataUnderInverterLevel, auxiliary_merge)
+  
+  # Nest the problems
+  ClassificationUnderInverter %<>% nest(State) 
+  
+  # # Problems # #
+  
+  # Result Problem Categorization
+  DataHierarchy <- DataHierarchy[, Element := Inverter]
+  
+  ClassificationProblems <- as.data.table(dplyr::left_join(DataHierarchy[, ..SubsystemsUnderInverter], 
+                                                           DataInverter[, .(Timestamp, Element)], by = "Element"))
+   
+  
+  
+  # # # Conditions # # #
+  
+  # # Total Plant Unavailability Block # #
+  
+  # Problem 1.1. Stop Forced SET Grid
+  # Code: PSFSG
+  ## Condition 1.1: Internal / Stop / Forced / SET / Grid / Grid Fault
+  ### PPC.ActivePower = 0 AND Stop SET by Grid
+  ClassificationPPC[, PSFSG := ifelse(
+    is.na(ActivePower), NA,
+    ifelse(length(intersect(StopSETbyGridAlarms$V1, data[[1]]$State)) != 0 & ActivePower <= 0, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationPPC[, .(Timestamp, Element, PSFSG)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationPPC <- ClassificationPPC[PSFSG != 1 | is.na(PSFSG), .SD, .SDcols = !"PSFSG"]
+  
+  
+  # Problem 1.2. Stop Forced Grid Curtailment 
+  # Code: PSTGC
+  ## Condition 1.2: External / Stop / Forced / Grid / Grid /Curtailment
+  ### (PPC.ActivePower <= 0 AND PPC.SetpointCurtailment = 0) OR Stop Curtailment Grid 
+  ClassificationPPC[, PSTGC := ifelse(
+    length(intersect(StopCurtailmentGridAlarms$V1, data[[1]]$State)) != 0 |
+      (!is.na(ActivePower) & !is.na(SetpointCurtailment) &
+         (ActivePower <= 0 & SetpointCurtailment == 0 & SunCycle == 'Day')), 1,
+    ifelse(is.na(ActivePower) | is.na(SetpointCurtailment), NA, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationPPC[, .(Timestamp, Element, PSTGC)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationPPC <- ClassificationPPC[PSTGC != 1 | is.na(PSTGC), .SD, .SDcols = !"PSTGC"]
+  
+  
+  # Problem 1.3. Stop Other Grid
+  # Code: PSOG
+  ## Condition 1.3: External / Stop / Other / Grid / Grid / Other Grid /Other Grid Event
+  ### PPC.ActivePower <= 0 AND Stop Grid
+  ClassificationPPC[, PSOG := ifelse(
+    is.na(ActivePower), NA,
+    ifelse(length(intersect(StopGridAlarms$V1, data[[1]]$State)) != 0 & ActivePower <= 0, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationPPC[, .(Timestamp, Element, PSOG)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationPPC <- ClassificationPPC[PSOG != 1 | is.na(PSOG), .SD, .SDcols = !"PSOG"]
+  
+  
+  # Problem 2.1. Stop Forced plant SET Manual
+  # Code: PSFSM
+  ## Condition 2.1: Internal / Stop / Forced / SET / Indisponibilidad SET / Manual
+  ### PPC.ActivePower <= 0 AND Manual Stop SET
+  ClassificationPPC[, PSFSM := ifelse(
+    is.na(ActivePower), NA,
+    ifelse(length(intersect(ManualStopSETAlarms$V1, data[[1]]$State)) != 0 & ActivePower <= 0, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationPPC[, .(Timestamp, Element, PSFSM)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationPPC <- ClassificationPPC[PSFSM != 1 | is.na(PSFSM), .SD, .SDcols = !"PSFSM"]
+  
+  
+  # Problem 2.2. Stop Forced plant SET by Alarms
+  # Code: PSFSA
+  ## Condition 2.2: Internal / Stop / Forced / SET / Indisponibilidad SET / Fault Alarm
+  ### PPC.ActivePower <= 0 AND Stop SET by Fault
+  ClassificationPPC[, PSFSA := ifelse(
+    is.na(ActivePower), NA,
+    ifelse(length(intersect(StopSETbyFaultAlarms$V1, data[[1]]$State)) != 0 & ActivePower <= 0, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationPPC[, .(Timestamp, Element, PSFSA)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationPPC <- ClassificationPPC[PSFSA != 1 | is.na(PSFSA), .SD, .SDcols = !"PSFSA"]
+  
+  
+  # Problem 2.3. Stop Forced plant SET shutdown
+  # Code: PSFSSD
+  ## Condition 2.3: Internal / Stop / Forced / SET / Indisponibilidad SET / Shutdown
+  ### PPC.ActivePower <= 0 AND Shutdown Stop SET
+  ClassificationPPC[, PSFSSD := ifelse(
+    is.na(ActivePower), NA,
+    ifelse(length(intersect(ShutdownStopSETAlarms$V1, data[[1]]$State)) != 0 & ActivePower <= 0, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationPPC[, .(Timestamp, Element, PSFSSD)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationPPC <- ClassificationPPC[PSFSSD != 1 | is.na(PSFSSD), .SD, .SDcols = !"PSFSSD"]
+  
+  
+  # # Partial Plant Unavailability Block # #
+  
+  setkey(ClassificationInverter, "Timestamp", "Element")
+  setkey(ClassificationPPC, "Timestamp", "Element")
+  ClassificationInverter <- ClassificationInverter[ClassificationPPC[, .(Timestamp, Element)], ]
+  
+  setkey(ClassificationUnderInverter, "Timestamp", "Element")
+  ClassificationUnderInverter <- ClassificationUnderInverter[ClassificationInverter[, .(Timestamp, Element)]]
+  
+  # Problem 3.1. Stop Forced Inverter manual 
+  # Code: PSFIM
+  ## Condition 3.1 : Internal / Stop / Forced / Inverter / Indisponibilidad Inverter / Manual
+  ### INV.ActivePower <= 0 AND Manual Stop Inverter AND ContractualIrradianceThreshold < INV.Irradiance
+  ClassificationInverter[, PSFIM := ifelse(
+    is.na(ActivePower), NA,
+    ifelse(length(intersect(ManualStopInverterAlarms$V1, data[[1]]$State)) != 0 & ActivePower <= 0 & ContractualIrradianceThreshold < Irradiance, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationInverter[, .(Timestamp, Element, PSFIM)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationInverter <- ClassificationInverter[PSFIM != 1 | is.na(PSFIM), .SD, .SDcols = !"PSFIM"]
+  
+  
+  # Problem 3.2. Stop Forced Inverter Curtailment
+  # Code: PSFIC
+  ## Condition 3.2 :  External / Stop / Forced / Inverter / Indisponibilidad Inverter / Curtailment
+  ### INV.ActivePower <= 0 AND INV.SetpointActivePower AND ContractualIrradianceThreshold < INV.Irradiance
+  ClassificationInverter[, PSFIC := ifelse(
+    is.na(ActivePower) | is.na(SetpointActivePower), NA,
+    ifelse(ActivePower <= 0 & SetpointActivePower == 0 & ContractualIrradianceThreshold < Irradiance, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationInverter[, .(Timestamp, Element, PSFIC)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationInverter <- ClassificationInverter[PSFIC != 1 | is.na(PSFIC), .SD, .SDcols = !"PSFIC"]
+  
+  
+  # Problem 3.3. Stop Forced Inverter Late awakening
+  # Code: PSFILA
+  ## Condition 3.3: Internal / Stop / Forced / Inverter / Indisponibilidad Inverter / Late Awakening
+  ### INV.ActivePower <= 0 AND ContractualIrradianceThreshold < INV.Irradiance < ContractualIrradianceThreshold + 100
+  setorder(ClassificationInverter, Element, Timestamp)
+  
+  ClassificationInverter[, PSFILA := {
+    if (all(ActivePower <= 0, na.rm = TRUE)) {
+      rep(0, .N)  # If all ActivePower values are <= 0, set PSFILA to 0 for the group
+    } else {
+      FirstNonzeroIndex <- which(ActivePower > 0)[1]  # Find the index of first ActivePower > 0
+      
+      if (!is.na(FirstNonzeroIndex)) {
+        PSFILAValues <- rep(0, .N)
+        PSFILAValues[1:(FirstNonzeroIndex - 1)] <- as.integer(ActivePower <= 0 & ContractualIrradianceThreshold < Irradiance)
+        PSFILAValues
+      } else {
+        rep(0, .N)  # If no ActivePower > 0, set PSFILA to 0 for the group
+      }
+    }
+  }, by = Element]
+  ClassificationInverter[is.na(ActivePower) | is.na(Irradiance), PSFILA := NA_integer_]
+  
+  ClassificationProblems %<>% merge(ClassificationInverter[, .(Timestamp, Element, PSFILA)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationInverter <- ClassificationInverter[PSFILA != 1 | is.na(PSFILA), .SD, .SDcols = !"PSFILA"]
+  
+  
+  # Problem 3.4. Stop Forced Inverter Shutdown
+  # Code: PSFISD
+  ## Condition 3.4: Internal / Stop / Forced / Inverter / Indisponibilidad Inverter / Shutdown Inverter
+  ### INV.ActivePower <= 0 AND ContractualIrradianceThreshold < INV.Irradiance
+  ClassificationInverter[, PSFISD := ifelse(
+    is.na(ActivePower) | is.na(Irradiance), NA,
+    ifelse(ActivePower <= 0 & ContractualIrradianceThreshold < Irradiance, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationInverter[, .(Timestamp, Element, PSFISD)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationInverter <- ClassificationInverter[PSFISD != 1 | is.na(PSFISD), .SD, .SDcols = !"PSFISD"]
+  
+  
+  # # Regulation Block # #
+  
+  # Problem 4.1. Regulation Export Grid constraint
+  # Code: PREGC
+  ## Condition 4.1: Internal / Regulation / Forced / Grid / Grid / Export Grid Constraint
+  ### PPC.ActivePower > LegalPowerLimit
+  ClassificationPPC[, PREGC := ifelse(
+    is.na(ActivePower), NA,
+    ifelse(ActivePower > LegalAllowedExportedPowerLimit, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationPPC[, .(Timestamp, Element, PREGC)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationPPC <- ClassificationPPC[, .SD, .SDcols = !"PREGC"]
+  
+  
+  # Problem 4.2. Regulation Forced Grid Curtailment
+  # Code: PRFGC
+  ## Condition 4.2: External / Regulation / Forced / Grid / Grid / Curtailment
+  ### PPC.AssetSetpoint < Plant.Producible 
+  ClassificationPPC[, PRFGC := ifelse(
+    is.na(AssetSetpoint) | is.na(Producible), NA,
+    ifelse(AssetSetpoint * Granularity  < Producible, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationPPC[, .(Timestamp, Element, PRFGC)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationPPC <- ClassificationPPC[PRFGC != 1 | is.na(PRFGC), .SD, .SDcols = !"PRFGC"]
+  
+  
+  # Problem 5.1. Regulation Forced Inverter Manual
+  # Code: PRFIM
+  ## Condition 5.1: External / Regulation / Forced / Inverter / Underperformance Inverter / Manual
+  ### PPC.SetpointActivePower < Plant.Producible & INV.ActivePower > 0 & Alarms
+  ClassificationInverter[,PRFIM:= ifelse(
+    is.na(SetpointActivePower) | is.na(Producible) | is.na(ActivePower), NA,
+    ifelse( length(intersect(CurtailmentGridAlarms$V1, data[[1]]$State)) != 0  & SetpointActivePower * Granularity < Producible & ActivePower > 0 , 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationInverter[, .(Timestamp, Element, PRFIM)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationInverter <- ClassificationInverter[PRFIM != 1 | is.na(PRFIM), .SD, .SDcols = !"PRFIM"]
+  
+  
+  # Problems 5.2. Regulation Forced Inverter Curtailment
+  # Code: PRFIC
+  ## Condition 5.2: External / Regulation / Forced / Inverter / Underperformance Inverter / Curtailment Inverter
+  ### PPC.SetpointActivePower < Plant.Producible & INV.ActivePower > 0
+  ClassificationInverter[, PRFIC := ifelse(
+    is.na(SetpointActivePower) | is.na(Producible) | is.na(ActivePower), NA,
+    ifelse(SetpointActivePower * Granularity < Producible & ActivePower > 0, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationInverter[, .(Timestamp, Element, PRFIC)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  ClassificationInverter <- ClassificationInverter[PRFIC != 1 | is.na(PRFIC), .SD, .SDcols = !"PRFIC"]
+  
+  
+  # Problems 5.3. Regulation Forced Inverter Other Underperformances
+  # Code: PRFIOUP
+  ## Condition 5.3 External / Regulation / Forced / Inverter / Underperformance Inverter / Inverter Other Regulation 
+  ### Plant.Producible / Plant.PPeak - Max(INV.ActivePower / INV.PPeak) > 20%
+  MaxRatio <- ClassificationInverter[, .(
+    MaxRatio = max(ActivePower * Granularity / PPeak, na.rm = TRUE)
+  ), by = Timestamp]
+
+  ProduciblePlant <- ProduciblePlant[MaxRatio, on = "Timestamp"]
+  ProduciblePlant[, PRFIOUP := ifelse(
+    is.na(Producible) | is.na(MaxRatio) | is.na(PPeak), NA,
+    ifelse(((Producible) / PPeak - MaxRatio) > 0.2, 1, 0)
+  )]
+
+  ClassificationProblems %<>% merge(ProduciblePlant[, .(Timestamp, PRFIOUP)], by = c("Timestamp"), all.x = TRUE) %>%
+    dplyr::distinct()
+  
+  # ClassificationProblems[, PRFIOUP := NA]
+  
+  
+  # # Underperformance Block # #
+  
+  if ("Tracker" %in% names(DataHierarchy)) {
+    
+    # Problems 7.1. Underperformance Forced Inverter Tracker stow
+    # Code: PUPFTS
+    ## Condition 7.1 Internal / Underperformance / Forced / Tracker / Underperformance Solar Field / Stow
+    ### (WindSpeed >= StowValue) & CurrentPosition == SetpointPosition & abs(CurrentPosition)==0
+    
+    
+    ClassificationTracker[, PUPFTS := ifelse(
+      is.na(CurrentPosition) | is.na(SetpointPosition), NA,
+      (length(intersect(StowAlarms$V1, data[[1]]$State)) > 0 | 
+         CurrentPosition == SetpointPosition & abs(CurrentPosition)==0 & 
+         WindSpeed >= StowValue) + 0
+    )]
+    
+    ClassificationProblems %<>% merge(ClassificationTracker[, .(Timestamp, Tracker = Element, PUPFTS)], by = c("Timestamp", "Tracker"), all.x = TRUE)
+    ClassificationTracker <- ClassificationTracker[PUPFTS != 1 | is.na(PUPFTS), .SD, .SDcols = !"PUPFTS"]
+    
+    
+    # Problems 7.2. Underperformance Forced Inverter Tracker Premature Stow
+    # Code: PUPFTPS
+    ## Condition 7.2 Internal / Underperformance / Forced / Tracker / Underperformance Solar Field / Premature Stow
+    ### (WindSpeed < DefenseTracker) & (CurrentPosition == SetpointPosition) & Premature Stow Alarms
+    ClassificationTracker[, PUPFTPS := ifelse(
+      is.na(CurrentPosition) | is.na(SetpointPosition), NA,
+      (length(intersect(PrematureStowAlarms$V1, data[[1]]$State)) > 0 & CurrentPosition == SetpointPosition) + 0
+    )]
+    
+    ClassificationProblems %<>% merge(ClassificationTracker[, .(Timestamp, Tracker = Element, PUPFTPS)], by = c("Timestamp", "Tracker"), all.x = TRUE)
+    ClassificationTracker <- ClassificationTracker[PUPFTPS != 1 | is.na(PUPFTPS), .SD, .SDcols = !"PUPFTPS"]
+    
+    
+    # Problems 7.3. Underperformance Forced Inverter Tracker Blocked
+    # Code: PUPFTB
+    ## Condition 7.3 Internal / Underperformance / Forced / Tracker / Underperformance Solar Field / Blocked
+    ###  (abs(CurrentPosition - SetpointPosition) > 3º) &  CurrentPosition == shift(CurrentPosition)
+    
+    ClassificationTracker <- ClassificationTracker[order(Inverter, Element, Timestamp)]
+    ClassificationTracker[, PUPFTB := ifelse(
+      is.na(CurrentPosition) | is.na(SetpointPosition),
+      NA,
+      (abs(CurrentPosition - SetpointPosition) > 3 & CurrentPosition == shift(CurrentPosition)) +0
+      
+    )]
+    
+    # ClassificationTracker[, PUPFTB := ifelse(
+    #   !duplicated(.SD) | !duplicated(.SD, fromLast = TRUE),
+    #   0, PUPFTB
+    # ), by = .(Element, Inverter)]
+    
+    # ClassificationTracker[, PUPFTB := ifelse(!duplicated(Element) | !duplicated(Element, fromLast = TRUE), 0, PUPFTB)]
+    
+    ClassificationProblems %<>% merge(ClassificationTracker[, .(Timestamp, Tracker = Element, PUPFTB)], by = c("Timestamp", "Tracker"), all.x = TRUE)
+    ClassificationTracker <- ClassificationTracker[PUPFTB != 1 | is.na(PUPFTB), .SD, .SDcols = !"PUPFTB"]
+    
+    
+    # Problems 7.4. Underperformance Forced Inverter Tracker Missalignment
+    # Code: PUPFTM
+    ## Condition 7.4 Internal / Underperformance / Forced / Tracker / Underperformance Solar Field / Missalignment
+    ### (abs(CurrentPosition - SetpointPosition) > 3º) 
+    ClassificationTracker[, PUPFTM := ifelse(
+      is.na(CurrentPosition) | is.na(SetpointPosition), NA,
+      (abs(CurrentPosition - SetpointPosition) > 3) + 0
+    )]
+    
+    ClassificationProblems %<>% merge(ClassificationTracker[, .(Timestamp, Tracker = Element, PUPFTM)], by = c("Timestamp", "Tracker"), all.x = TRUE)
+    
+  } else {
+    
+    ClassificationProblems[, `:=`(PUPFTS = NA_real_, PUPFTPS = NA_real_, PUPFTB = NA_real_, PUPFTM = NA_real_)]
+    
+  }
+  
+  
+  # Problems 8.1. Underperformance Forced Inverter Disconnected SCBs
+  # Code: PUPFIDSCB
+  ## Condition 8.1 Internal / Underperformance / Forced / Module / SCBs / Indisponibilidad Solar Field / Disconnected SCBs
+  ### ContractualIrradianceThreshold < INV.Irradiance & INV.DCPower <= 0
+  if (StringBoxSubsystem != "" & !is.null(StringBoxSubsystem)) {
+    ClassificationUnderInverter[, PUPFIDSCB := ifelse(
+      is.na(DCPower) | is.na(Irradiance), NA,
+      ifelse(DCPower <= 0 & ContractualIrradianceThreshold < Irradiance & ActivePower > 0 , 1, 0)
+    )]
+    
+    ClassificationUnderInverter <- ClassificationUnderInverter[order(Element, Timestamp)]
+    ClassificationUnderInverter[, consecutive_group := rleid(PUPFIDSCB, Element)]
+    ClassificationUnderInverter[, PUPFIDSCB := ifelse(
+      PUPFIDSCB == 1 & .N >= 3, 1, 0
+    ), by = .(Element, consecutive_group)]
+    ClassificationUnderInverter[, consecutive_group := NULL]
+    
+    ClassificationProblems %<>% merge(ClassificationUnderInverter[, .(Timestamp, Element, PUPFIDSCB)], by = c("Timestamp", "Element"), all.x = TRUE)
+  } else {
+    ClassificationProblems[, PUPFIDSCB := NA]
+  }
+  
+  # Problems 8.2. Underperformance Forced Inverter Disconnected Strings
+  # Code: PUPFIDS
+  ## Condition 8.2 Internal / Underperformance / Forced / Module / SCBs / Indisponibilidad Solar Field / Disconnected Strings
+  ### ContractualIrradianceThreshold < INV.Irradiance & STR.DCCurrent <= 0 & ActivePower > 0 & 
+  ### At least 3 timestamps where the String had the last conditions
+  
+  #String.DCPower = String.DCurrent * String.DCVoltage
+  if (StringSubsystem != "" & !is.null(StringSubsystem)) {
+    ClassificationString[, PUPFIDS := ifelse(
+      is.na(DCCurrent) | is.na(Irradiance), NA,
+      ifelse(DCCurrent <= 0 & ContractualIrradianceThreshold < Irradiance & ActivePower > 0, 1, 0)
+    )]
+    
+    # Order by Element and Timestamp
+    ClassificationString <- ClassificationString[order(Element, Timestamp)]
+    
+    # Create consecutive_group
+    ClassificationString[, consecutive_group := rleid(PUPFIDS, Element)]
+    
+    # Update PUPFIDS based on conditions
+    ClassificationString[, PUPFIDS := ifelse(
+      PUPFIDS == 1 & .N >= 15, 1, 0
+    ), by = .(Element, consecutive_group)]
+    
+    
+    # Remove unnecessary columns and rename
+    ClassificationString[, consecutive_group := NULL]
+    
+    setnames(ClassificationString, "Element", "String")
+    
+    ClassificationProblems %<>% merge(ClassificationString[, .(Timestamp, String, PUPFIDS)], by = c("Timestamp", "String"), all.x = TRUE)
+    
+    ClassificationString <- ClassificationString[PUPFIDS != 1]
+  } else {
+    ClassificationProblems[, PUPFIDS := NA]
+  }
+  
+  
+  
+  # Problems 6.1. Underperformance Forced Module Soiling
+  # Code: PUPMS
+  ## Condition 6.1 Internal / Underperformance / Forced / Module_SCBs / Underperformance Solar Field / Soiling
+  ### MET.Soiling < 98% AND INV.ActivePower > 0
+  LowerBound <- quantile(ClassificationUnderInverter$Soiling, 0.25, na.rm = TRUE) - 1.5 * IQR(ClassificationUnderInverter$Soiling, na.rm = TRUE)
+  UpperBound <- min(quantile(ClassificationUnderInverter$Soiling, 0.75, na.rm = TRUE) + 1.5 * IQR(ClassificationUnderInverter$Soiling, na.rm = TRUE), 100)
+  
+  ClassificationUnderInverter[, PUPMS := ifelse(
+    is.na(Soiling) | is.na(ActivePower), NA,
+    ifelse(Soiling < 98 & ActivePower > 0 & Soiling > LowerBound & Soiling < UpperBound, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationUnderInverter[, .(Timestamp, Element, PUPMS)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  
+  
+  # Problems 6.2. Underperformance Forced Module Ageing
+  # Code: PUPMA
+  ## Condition 6.2 Internal / Underperformance / Forced / Module_SCBs / Underperformance Solar Field / Ageing 
+  ### (PRPlantAdjusted - TargetPRAdjusted) / TargetPRAdjusted < 0
+  DataOperationalKPIs[, PUPMA := ifelse(
+    is.na(PRAdjusted) | is.infinite(PRAdjusted) | is.na(TargetPRAdjusted) | is.infinite(TargetPRAdjusted), NA,
+    ifelse((PRAdjusted - TargetPRAdjusted) / PRAdjusted < 0, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(DataOperationalKPIs[, .(Timestamp, PUPMA)], by = "Timestamp", all.x = TRUE) %>% 
+    dplyr::distinct()
+  
+  
+  # Problems 6.3. Underperformance Forced Module Shadowing
+  # Code: PUPMSH
+  ## Condition 6.3 Internal / Underperformance / Forced / Module_SCBs / Underperformance Solar Field / Shadowing
+  ### |Z| > 2 AND mean(STR.DCCurrent) > 0 AND ContractualIrradianceThreshold < INV.Irradiance < ContractualIrradianceThreshold + 100
+  
+  threshold_increase <- 25  # adjust as needed
+  threshold_decrease <- 25  # adjust as needed
+  
+  detect_troubled_timestamps <- function(data, threshold_increase, threshold_decrease) {
+    # Calculate differences between consecutive elements and percentage change
+    diff_percentage <- diff(data) / data[-length(data)] * 100
+    
+    # Detect sudden increase in dispersion
+    increase_detected <- c(FALSE, diff_percentage > threshold_increase)
+    
+    # Detect sudden decrease in dispersion
+    decrease_detected <- c(FALSE, diff_percentage < -threshold_decrease)
+    
+    # Find the index of the first occurrence of a sudden increase and decrease
+    start_index <- which(increase_detected)[1]
+    end_index <- which(decrease_detected)[1]
+    
+    # Create a vector indicating troubled timestamps
+    troubled_timestamps <- rep(0, length(data))
+    
+    # Check if start_index and end_index are valid, and if the length of the troubled period is <= 6
+    if (!is.na(start_index) && !is.na(end_index) && end_index > start_index && end_index - start_index <= 6) {
+      troubled_timestamps[start_index:end_index] <- 1
+    }
+    
+    return(troubled_timestamps)
+  }
+  
+  # Filter data to reduce unnecessary computation
+  ClassificationString2 <- ClassificationString[DCPower >= 0 & 0 < Irradiance & Irradiance <= ContractualIrradianceThreshold + 200]
+  
+  # Compute dispersion data
+  dispersion_data <- ClassificationString2[, .(Dispersion = sd(DCPower, na.rm = TRUE)), by = .(Timestamp, Inverter)]
+  
+  
+  dispersion_data[, problem := {
+    troubled_timestamps <- detect_troubled_timestamps(Dispersion, threshold_increase, threshold_decrease)
+    troubled_timestamps
+  }, by = Inverter]
+
+  
+  # Merge dispersion data with ClassificationString
+  ClassificationString <- merge(ClassificationString, dispersion_data, by = c("Timestamp", "Inverter"), all.x = TRUE)
+  
+  # Replace NA with 0 in problem column
+  ClassificationString[is.na(problem), problem := 0]
+  
+  # Compute median DCPower for each timestamp
+  median_DCPower <- ClassificationString[, .(Median_DCPower = median(DCPower, na.rm = TRUE)), by = .(Timestamp)]
+  
+  # Merge median DCPower with ClassificationString
+  ClassificationString <- merge(ClassificationString, median_DCPower, by = "Timestamp", all.x = TRUE)
+  
+  # Compute PUPMSH based on conditions
+  ClassificationString[, PUPMSH := ifelse(DCPower < Median_DCPower & problem == 1, 1, 0)]
+  
+  
+  
+  ClassificationProblems %<>% merge(ClassificationString[, .(Timestamp, String, PUPMSH)], by = c("Timestamp", "String"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  
+  
+  # Problems 6.4. Underperformance Forced Inverter Underperformance Module/SCBs Other
+  # Code: PUPFIUPOSF
+  ## Condition 6.4 Internal / Underperformance / Forced / Module_SCBs / Underperformance Solar Field / Other
+  ### INV.ActivePower > 0 AND mean(STR.DCCurrent) > 0 AND (PlantMedianSpecificIntensity - SpecificIntensity) > 15 %
+  
+  # if ("string" %in% names(DatasetUnification)) {
+  #   #le quitamos los strings caidos y los que han sido detectados con shadowing?
+  # 
+  #   DataSolarFieldLosses = anti_join(DataSolarField, ClassificationProblems %>% filter(PUPFIDS==1 & PUPMSH == 1),
+  #                                                      by = c('Timestamp', 'Element'))
+  #   setDT(DataSolarFieldLosses)
+  # 
+  #   # Calculate PlantMedianSpecificIntensity
+  #   PlantMedianSpecificIntensity <- DataString[, .(PlantMedianSpecificIntensity = median(SpecificIntensity, na.rm = TRUE)), by = .(Timestamp, Element)]
+  #   setnames(DataSolarFieldLosses, old = c("Element", "Inverter"), new = c("String", "Element"))
+  # 
+  # } else if ("stringbox" %in% names(DatasetUnification)) {
+  #   DataSolarFieldLosses = anti_join(DataSolarField,  ClassificationProblems %>% filter(PUPFIDSCB==1 & PUPMSH == 1),
+  #                          by = c('Timestamp', 'Element'))
+  #   PlantMedianSpecificIntensity <- median(DataStringbox2$SpecificIntensity, na.rm = TRUE)
+  #   setnames(DataSolarFieldLosses, old = c("Element", "Inverter"), new = c("Stringbox", "Element"))
+  # }
+  # 
+  # 
+  # ClassificationUnderInverter2 =  ClassificationUnderInverter %>%
+  #   dplyr::rename(PlantSpecificIntensity = SpecificIntensity)
+  # 
+  # StringInverterUnder <- merge(PlantMedianSpecificIntensity,
+  #                              ClassificationUnderInverter2[,.(Timestamp, Element, ActivePower, PlantSpecificIntensity )], by = c('Timestamp', 'Element'), all.x = TRUE )
+  # 
+  # StringInverterUnder[, PUPFIUPOSF := ifelse(
+  #   is.na(DCCurrent) | is.na(ActivePower) | is.na(SpecificIntensity), NA,
+  #   ifelse(ActivePower > 0 & DCCurrent <= 0 & (PlantSpecificIntensity - SpecificIntensity) > 0.15, 1, 0)
+  # )]
+  # 
+  # 
+  # 
+  # if ("string" %in% names(DatasetUnification)) {
+  #   ClassificationProblems %<>% merge(StringInverterUnder[, .(Timestamp, String, PUPFIUPOSF)], by = c("Timestamp", "String"), all.x = TRUE) %>%
+  #     dplyr::distinct()
+  # 
+  # } else if ("stringbox" %in% names(DatasetUnification)) {
+  #   ClassificationProblems %<>% merge(StringInverterUnder[, .(Timestamp, String, PUPFIUPOSF)], by = c("Timestamp", "Stringbox"), all.x = TRUE) %>%
+  #     dplyr::distinct()
+  # }
+
+  
+  filter_condition <- switch(dataset_name,
+                             "string" = ClassificationProblems$PUPFIDS == 1,
+                             "stringbox" = ClassificationProblems$PUPFIDSCB == 1)
+  
+
+  #Quito los strings caidos y los que tengan shadowing
+  DataSolarFieldLosses <- anti_join(DataSolarField2, ClassificationProblems %>% filter(filter_condition & PUPMSH == 1),
+                                    by = c('Timestamp', 'Element'))
+  
+  # Calculo la mediana de la SpecificIntensity para cada inverter
+  PlantMedianSpecificIntensity <-  DataSolarFieldLosses[, .(PlantMedianSpecificIntensity = median(SpecificIntensity, na.rm = TRUE)), by = .(Timestamp, Element)] 
+  
+  setnames(DataSolarFieldLosses, old = c("Element", "Inverter"), new = c(ifelse(dataset_name == "string", "String", "Stringbox"), "Element"))
+  
+  
+  # Mergeo este ultimo df con el de los strings con perdidas
+  
+  StringInverterUnder <- merge(DataSolarFieldLosses,
+                               PlantMedianSpecificIntensity, by = c('Timestamp', 'Element'), all.x = TRUE)
+  StringInverterUnderInverter <- merge(StringInverterUnder, ClassificationInverter[, .(Timestamp, Element, ActivePower)], by = c('Timestamp', 'Element'), all.x = TRUE)
+  
+  # Implementamos la condición: 
+  StringInverterUnderInverter[, PUPFIUPOSF := ifelse(
+    is.na(DCCurrent) | is.na(ActivePower) | is.na(SpecificIntensity), NA,
+    ifelse(ActivePower > 0 & DCCurrent <= 0 & (PlantMedianSpecificIntensity - SpecificIntensity) > 0.15, 1, 0)
+  )]
+  
+  
+  # Si habia strings caidos el problema tendrá un NA
+  if (dataset_name == "string") {
+    ClassificationProblems %<>% merge(StringInverterUnderInverter[, .(Timestamp, String, PUPFIUPOSF)], by = c("Timestamp", 'String'), all.x = TRUE) %>%
+      dplyr::distinct()
+  } else {
+    ClassificationProblems %<>% merge(StringInverterUnderInverter[, .(Timestamp, Stringbox, PUPFIUPOSF)], by = c("Timestamp", 'Stringbox'), all.x = TRUE) %>%
+      dplyr::distinct()
+  } 
+  
+
+
+  
+  
+  # ClassificationUnderInverter2 <- ClassificationUnderInverter %>%
+  #   dplyr::rename(PlantSpecificIntensity = SpecificIntensity)
+  # 
+  # StringInverterUnder <- merge(PlantMedianSpecificIntensity,
+  #                              ClassificationUnderInverter2[, .(Timestamp, Element, ActivePower, PlantSpecificIntensity)], by = c('Timestamp', 'Element'), all.x = TRUE)
+  # 
+  # StringInverterUnder[, PUPFIUPOSF := ifelse(
+  #   is.na(DCCurrent) | is.na(ActivePower) | is.na(SpecificIntensity), NA,
+  #   ifelse(ActivePower > 0 & DCCurrent <= 0 & (PlantSpecificIntensity - SpecificIntensity) > 0.15, 1, 0)
+  # )]
+  # 
+  # classification_column <- ifelse(dataset_name == "string", "String", "Stringbox")
+  # 
+  # ClassificationProblems %<>% merge(StringInverterUnder[, .(Timestamp, classification_column, PUPFIUPOSF)], by = c("Timestamp", classification_column), all.x = TRUE) %>%
+  #   dplyr::distinct()
+
+  
+  
+  # Problems 9.1. Underperformance Forced Inverter Inefficiency
+  # Code: PUPFII
+  ## Condition 9.1 Internal / Underperformance / Forced / Inverter / Underperformance Inverter / Inverter Inefficiency
+  ### INV.ActivePower > 0 AND INV.ActivePower < INV.DCPower AND INV.ActivePower / INV.DCPower < NominalEfficiencyInv
+  ClassificationUnderInverter[, PUPFII := ifelse(
+    is.na(ActivePower) | is.na(DCPower), NA,
+    ifelse(ActivePower > 0 & ActivePower < DCPower & ActivePower / DCPower < NominalEfficiencyInv, 1, 0)
+  )]
+  
+  ClassificationProblems %<>% merge(ClassificationUnderInverter[, .(Timestamp, Element, PUPFII)], by = c("Timestamp", "Element"), all.x = TRUE) %>% 
+    dplyr::distinct()
+  
+  
+  # Problems 9.2. Underperformance Forced Inverter Fault Alarm
+  # Code: PUPIFA
+  ## Condition 9.2 Internal / Underperformance / Forced / Inverter / Underperformance Inverter / Fault / Alarms
+  ### INV.ActivePower > 0 & Plant.Producible / Plant.PPeak - max(INV.DCPower / INV.PPeak) > 20% & Underperformance Inverter Alarms
+  # ClassificationUnderInverter %<>% merge(MaxRatio,  by = c("Timestamp"), all.x = TRUE)
+  # 
+  ClassificationUnderInverter = ClassificationUnderInverter %>% merge(MaxRatio, by = c('Timestamp'), all.x = TRUE)
+  ClassificationUnderInverter[, PUPIFA := ifelse(
+    is.na(ActivePower) | is.na(MaxRatio), NA,
+    ifelse(ActivePower > 0 & (MaxRatio - Producible / PPeak) > 0.2 & length(intersect(UnderperformanceInverterAlarms$V1, data[[1]]$State)) > 0, 1, 0)
+  )]
+  #
+  ClassificationProblems %<>% merge(ClassificationUnderInverter[, .(Timestamp, Element, PUPIFA)], by = c("Timestamp", "Element"), all.x = TRUE) %>%
+    dplyr::distinct()
+
+  ClassificationProblems[, PUPIFA := NA]
+  
+  
+  # Problems 9.3. Underperformance Forced Inverter Anomalies
+  # Code: PUPFIA
+  ## Condition 9.3 Internal / Underperformance / Forced / Inverter / Underperformance Inverter / Inverter Performance Anomalies
+  ### INV.ActivePower > 0 & Plant.Producible / Plant.PPeak - max(INV.DCPower / INV.PPeak) > 20%
+  
+  
+  filter_condition <- switch(dataset_name,
+                             "string" = ClassificationProblems$PUPFIDS == 1,
+                             "stringbox" = ClassificationProblems$PUPFIDSCB == 1)
+  
+  ClassificationInverterNoFallenString <- ClassificationInverter %>%
+    anti_join( ClassificationProblems[filter_condition, .(Timestamp, Element)], by = c('Timestamp', 'Element'))
+  MedRatio = ClassificationInverterNoFallenString[, .(
+    MedRatio = median(ActivePower / PPeak, na.rm = TRUE)
+  ), by = Timestamp]
+  
+  ClassificationUnderInverterNoFallenString <- ClassificationUnderInverter %>%
+    anti_join( ClassificationProblems[filter_condition, .(Timestamp, Element)], by = c('Timestamp', 'Element'))
+  ClassificationUnderInverter <- ClassificationUnderInverterNoFallenString[MedRatio, on = "Timestamp"]
+  
+  ClassificationUnderInverter[, PUPFIA := ifelse(
+    is.na(ActivePower) | is.na(MedRatio), NA,
+    ifelse(ActivePower > 0 & (ActivePower / PPeak - MedRatio) > 0.2, 1, 0)
+  )]
+    
+    ClassificationProblems %<>% merge(ClassificationUnderInverter[, .(Timestamp, Element, PUPFIA)], by = c("Timestamp", "Element"), all.x = TRUE) %>%
+      dplyr::distinct()
+
+  
+  
+  # if ("string" %in% names(DatasetUnification)) {
+  #   ClassificationInverterNoFallenString <- ClassificationInverter %>%
+  #     anti_join( ClassificationProblems[PUPFIDS == 1, .(Timestamp, Element)], by = c('Timestamp', 'Element'))
+  #   MedRatio = ClassificationInverterNoFallenString[, .(
+  #     MedRatio = median(ActivePower / PPeak, na.rm = TRUE)
+  #   ), by = Timestamp]
+  #   ClassificationUnderInverterNoFallenString <- ClassificationUnderInverter %>%
+  #     anti_join( ClassificationProblems[PUPFIDS == 1, .(Timestamp, Element)], by = c('Timestamp', 'Element'))
+  # 
+  #   ClassificationUnderInverter <- ClassificationUnderInverterNoFallenString[MedRatio, on = "Timestamp"]
+  # 
+  #   ClassificationUnderInverter[, PUPFIA := ifelse(
+  #     is.na(ActivePower) | is.na(MedRatio), NA,
+  #     ifelse(ActivePower > 0 & (ActivePower / PPeak - MedRatio) > 0.2, 1, 0)
+  #   )]
+  # 
+  #   ClassificationProblems %<>% merge(ClassificationUnderInverter[, .(Timestamp, Element, PUPFIA)], by = c("Timestamp", "Element"), all.x = TRUE) %>%
+  #     dplyr::distinct()
+  # }
+  # 
+  # 
+  # 
+  # 
+  # else if ("stringbox" %in% names(DatasetUnification)) {
+  #   ClassificationInverterNoFallenStringBox <- ClassificationInverter %>%
+  #     anti_join( ClassificationProblems[PUPFIDSCB == 1, .(Timestamp, Element)], by = c('Timestamp', 'Element'))
+  #   MedRatio = ClassificationInverterNoFallenStringBox[, .(
+  #     MedRatio = median(ActivePower / PPeak, na.rm = TRUE)
+  #   ), by = Timestamp]
+  #   ClassificationUnderInverterNoFallenStringBox <- ClassificationUnderInverter %>%
+  #     anti_join( ClassificationProblems[PUPFIDSCB == 1, .(Timestamp, Element)], by = c('Timestamp', 'Element'))
+  # 
+  #   ClassificationUnderInverter <- ClassificationUnderInverterNoFallenStringBox[MedRatio, on = "Timestamp"]
+  # 
+  #   ClassificationUnderInverter[, PUPFIA := ifelse(
+  #     is.na(ActivePower) | is.na(MedRatio), NA,
+  #     ifelse(ActivePower > 0 & (ActivePower / PPeak - MedRatio) > 0.2, 1, 0)
+  #   )]
+  # 
+  #   ClassificationProblems %<>% merge(ClassificationUnderInverter[, .(Timestamp, Element, PUPFIA)], by = c("Timestamp", "Element"), all.x = TRUE) %>%
+  #     dplyr::distinct()
+  # 
+  # }
+  
+  
+
+
+
+  
+  # Problems 10.1. Underperformance Forced Inverter Clipping
+  # Code: PUPFIC
+  ## Condition 10.1 Internal / Underperformance / Forced / Inverter / Underperformance Inverter / Clipping
+  ### MET.Irradiance > 1000 / (Plant.PPeak / Plant.PNom) - 50 & Incremental(INV.ActivePower) = 0 & Incremental(INV.Irradiance) > 0 & ¿?
+  ClassificationProblems[, PUPFIC := NA]
+  
+  return(ClassificationProblems)
+}
